@@ -23,6 +23,7 @@
  */
 package org.jenkinsci.plugins.docker.workflow;
 
+import java.io.IOException;
 import java.util.Map;
 
 import com.google.inject.Inject;
@@ -94,25 +95,23 @@ public class FromFingerprintStep extends AbstractStepImpl {
         @StepContextParameter private transient Node node;
 
         @Override protected Void run() throws Exception {
-            FilePath dockerfilePath = workspace.child(step.dockerfile);
-            Dockerfile dockerfile = new Dockerfile(dockerfilePath);
-            Map<String, String> buildArgs = DockerUtils.parseBuildArgs(dockerfile, step.commandLine);
-            String fromImage = dockerfile.getFroms().getLast();
-
-            if (dockerfile.getFroms().isEmpty()) {
-                throw new AbortException("could not find FROM instruction in " + dockerfilePath);
-            }
-            if (buildArgs != null) {
-                // Fortunately, Docker uses the same EnvVar syntax as Jenkins :)
-                fromImage = Util.replaceMacro(fromImage, buildArgs);
-            }
             DockerClient client = new DockerClient(launcher, node, step.toolName);
-            String descendantImageId = client.inspectRequiredField(env, step.image, FIELD_ID);
-            if (fromImage.equals("scratch")) { // we just made a base image
-                DockerFingerprints.addFromFacet(null, descendantImageId, run);
-            } else {
-                DockerFingerprints.addFromFacet(client.inspectRequiredField(env, fromImage, FIELD_ID), descendantImageId, run);
+            String descendantImageId = client.inspectRequiredField(env, step.image, ".Id");
+            String baseImageId = descendantImageId;
+            String fromImage = null;
+            while (! "".equals(baseImageId = client.inspectRequiredField(env, baseImageId, ".Parent"))) {
+                try {
+                    fromImage = client.inspectRequiredField(env, baseImageId, "index (.RepoTags) 0");
+                    break;
+                } catch (IOException e) {
+                }
+            }
+
+            if (fromImage != null) {
+                DockerFingerprints.addFromFacet(baseImageId, descendantImageId, run);
                 ImageAction.add(fromImage, run);
+            } else { // we just made a base image
+                DockerFingerprints.addFromFacet(null, descendantImageId, run);
             }
             return null;
         }
